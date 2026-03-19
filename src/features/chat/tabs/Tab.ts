@@ -1,8 +1,9 @@
 import type { Component } from 'obsidian';
 import { Notice } from 'obsidian';
 
-import { ClaudianService } from '../../../core/agent';
 import type { McpServerManager } from '../../../core/mcp';
+import { ProviderRegistry } from '../../../core/providers';
+import type { ChatRuntime } from '../../../core/runtime';
 import type { ChatMessage, ClaudeModel, Conversation, EffortLevel, PermissionMode, SlashCommand, ThinkingBudget } from '../../../core/types';
 import { DEFAULT_CLAUDE_MODELS, DEFAULT_EFFORT_LEVEL, DEFAULT_THINKING_BUDGET, getContextWindowSize, isAdaptiveThinkingModel } from '../../../core/types';
 import { t } from '../../../i18n';
@@ -22,9 +23,7 @@ import {
 import { cleanupThinkingBlock, MessageRenderer } from '../rendering';
 import { findRewindContext } from '../rewind';
 import { BangBashService } from '../services/BangBashService';
-import { InstructionRefineService } from '../services/InstructionRefineService';
 import { SubagentManager } from '../services/SubagentManager';
-import { TitleGenerationService } from '../services/TitleGenerationService';
 import { ChatState } from '../state';
 import {
   BangBashModeManager as BangBashModeManagerClass,
@@ -223,7 +222,7 @@ function buildTabDOM(contentEl: HTMLElement): TabDOMElements {
 }
 
 /**
- * Initializes the tab's ClaudianService (lazy initialization).
+ * Initializes the tab's chat runtime (lazy initialization).
  * Call this when the tab becomes active or when the first message is sent.
  *
  * Session ID resolution:
@@ -244,43 +243,41 @@ export async function initializeTabService(
     return;
   }
 
-  let service: ClaudianService | null = null;
+  let service: ChatRuntime | null = null;
   let unsubscribeReadyState: (() => void) | null = null;
 
   try {
-    // Create per-tab ClaudianService
-    service = new ClaudianService(plugin, mcpManager);
+    service = ProviderRegistry.createChatRuntime({ plugin, mcpManager });
     unsubscribeReadyState = service.onReadyStateChange((ready) => {
       tab.ui.modelSelector?.setReady(ready);
     });
     tab.dom.eventCleanups.push(() => unsubscribeReadyState?.());
 
-    // Resolve session ID and external contexts from conversation if this is an existing chat
-    // Single source of truth: tab.conversationId determines if we have a session to resume
-    let sessionId: string | undefined;
     let externalContextPaths = plugin.settings.persistentExternalContextPaths || [];
     if (tab.conversationId) {
       const conversation = await plugin.getConversationById(tab.conversationId);
 
       if (conversation) {
-        sessionId = service.applyForkState(conversation) ?? undefined;
-
         const hasMessages = conversation.messages.length > 0;
         externalContextPaths = hasMessages
           ? conversation.externalContextPaths || []
           : (plugin.settings.persistentExternalContextPaths || []);
-      }
-    }
 
-    // Ensure SDK process is ready
-    // - Existing chat: with sessionId for resume
-    // - New chat: without sessionId
-    service.ensureReady({
-      sessionId,
-      externalContextPaths,
-    }).catch(() => {
-      // Best-effort, ignore failures
-    });
+        service.syncConversationState(conversation, externalContextPaths);
+      } else {
+        service.ensureReady({
+          externalContextPaths,
+        }).catch(() => {
+          // Best-effort, ignore failures
+        });
+      }
+    } else {
+      service.ensureReady({
+        externalContextPaths,
+      }).catch(() => {
+        // Best-effort, ignore failures
+      });
+    }
 
     // Only set tab state after successful initialization
     tab.service = service;
@@ -288,7 +285,7 @@ export async function initializeTabService(
   } catch (error) {
     // Clean up partial state on failure
     unsubscribeReadyState?.();
-    service?.closePersistentQuery('initialization failed');
+    service?.cleanup();
     tab.service = null;
     tab.serviceInitialized = false;
 
@@ -374,8 +371,8 @@ function initializeSlashCommands(
 function initializeInstructionAndTodo(tab: TabData, plugin: ClaudianPlugin): void {
   const { dom } = tab;
 
-  tab.services.instructionRefineService = new InstructionRefineService(plugin);
-  tab.services.titleGenerationService = new TitleGenerationService(plugin);
+  tab.services.instructionRefineService = ProviderRegistry.createInstructionRefineService(plugin);
+  tab.services.titleGenerationService = ProviderRegistry.createTitleGenerationService(plugin);
   tab.ui.instructionModeManager = new InstructionModeManagerClass(
     dom.inputEl,
     {
@@ -615,26 +612,25 @@ interface ForkSource {
  * Shows a notice and returns null when no session can be resolved.
  */
 function resolveForkSource(tab: TabData, plugin: ClaudianPlugin): ForkSource | null {
-  let sourceSessionId = tab.service?.getSessionId() ?? null;
+  const conversation = tab.conversationId
+    ? plugin.getConversationSync(tab.conversationId)
+    : null;
 
-  if (!sourceSessionId && tab.conversationId) {
-    const conversation = plugin.getConversationSync(tab.conversationId);
-    sourceSessionId = conversation?.sdkSessionId ?? conversation?.sessionId ?? conversation?.forkSource?.sessionId ?? null;
-  }
+  // Delegate session ID resolution to the runtime when available;
+  // fall back to persisted conversation metadata when no runtime is active.
+  const sourceSessionId = tab.service
+    ? tab.service.resolveSessionIdForFork(conversation ?? null)
+    : conversation?.sdkSessionId ?? conversation?.sessionId ?? conversation?.forkSource?.sessionId ?? null;
 
   if (!sourceSessionId) {
     new Notice(t('chat.fork.failed', { error: t('chat.fork.errorNoSession') }));
     return null;
   }
 
-  const sourceConversation = tab.conversationId
-    ? plugin.getConversationSync(tab.conversationId)
-    : undefined;
-
   return {
     sourceSessionId,
-    sourceTitle: sourceConversation?.title,
-    currentNote: sourceConversation?.currentNote,
+    sourceTitle: conversation?.title,
+    currentNote: conversation?.currentNote,
   };
 }
 
@@ -1121,10 +1117,8 @@ export async function destroyTab(tab: TabData): Promise<void> {
   }
   tab.dom.eventCleanups.length = 0;
 
-  // Close the tab's service
-  // Note: closePersistentQuery is synchronous but we make destroyTab async
-  // for future-proofing and proper cleanup ordering
-  tab.service?.closePersistentQuery('tab closed');
+  // Cleanup the tab runtime before removing the DOM tree.
+  tab.service?.cleanup();
   tab.service = null;
 
   // Remove DOM element

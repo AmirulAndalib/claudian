@@ -1,7 +1,7 @@
 import { Notice } from 'obsidian';
 
-import type { ClaudianService } from '../../../core/agent';
 import type { McpServerManager } from '../../../core/mcp';
+import type { ChatRuntime } from '../../../core/runtime';
 import type { SlashCommand } from '../../../core/types';
 import { t } from '../../../i18n';
 import type ClaudianPlugin from '../../../main';
@@ -181,15 +181,14 @@ export class TabManager implements TabManagerInterface {
       } else if (tab.conversationId && tab.state.messages.length > 0 && tab.service) {
         // Tab already has messages loaded - sync service session to conversation
         // This handles the case where user switches between tabs with different sessions
-        const conversation = await this.plugin.getConversationById(tab.conversationId);
+        const conversation = this.plugin.getConversationSync(tab.conversationId);
         if (conversation) {
           const hasMessages = conversation.messages.length > 0;
           const externalContextPaths = hasMessages
             ? conversation.externalContextPaths || []
             : (this.plugin.settings.persistentExternalContextPaths || []);
 
-          const resolvedSessionId = tab.service.applyForkState(conversation);
-          tab.service.setSessionId(resolvedSessionId, externalContextPaths);
+          tab.service.syncConversationState(conversation, externalContextPaths);
         }
       } else if (!tab.conversationId && tab.state.messages.length === 0) {
         // New tab with no conversation - initialize welcome greeting
@@ -571,11 +570,11 @@ export class TabManager implements TabManagerInterface {
   // ============================================
 
   /**
-   * Broadcasts a function call to all tabs' ClaudianService instances.
+   * Broadcasts a function call to all initialized tab runtimes.
    * Used by settings managers to apply configuration changes to all tabs.
-   * @param fn Function to call on each service.
+   * @param fn Function to call on each runtime.
    */
-  async broadcastToAllTabs(fn: (service: ClaudianService) => Promise<void>): Promise<void> {
+  async broadcastToAllTabs(fn: (service: ChatRuntime) => Promise<void>): Promise<void> {
     const promises: Promise<void>[] = [];
 
     for (const tab of this.tabs.values()) {
@@ -597,15 +596,15 @@ export class TabManager implements TabManagerInterface {
 
   /** Destroys all tabs and cleans up resources. */
   async destroy(): Promise<void> {
-    // Save all conversations
-    for (const tab of this.tabs.values()) {
-      await tab.controllers.conversationController?.save();
-    }
+    // Save all conversations in parallel (independent per-tab)
+    await Promise.all(
+      Array.from(this.tabs.values()).map(
+        tab => tab.controllers.conversationController?.save() ?? Promise.resolve()
+      )
+    );
 
-    // Destroy all tabs (async for proper cleanup)
-    for (const tab of this.tabs.values()) {
-      await destroyTab(tab);
-    }
+    // Destroy all tabs in parallel (independent per-tab, must run after saves complete)
+    await Promise.all(Array.from(this.tabs.values()).map(tab => destroyTab(tab)));
 
     this.tabs.clear();
     this.activeTabId = null;

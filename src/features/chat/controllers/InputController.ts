@@ -1,28 +1,25 @@
 import { Notice } from 'obsidian';
 
-import type { ApprovalCallbackOptions, ClaudianService } from '../../../core/agent';
 import { detectBuiltInCommand } from '../../../core/commands';
+import type { InstructionRefineService, TitleGenerationService } from '../../../core/providers';
+import type { ApprovalCallbackOptions, ChatRuntime, ChatTurnRequest } from '../../../core/runtime';
 import { TOOL_EXIT_PLAN_MODE } from '../../../core/tools/toolNames';
 import type { ApprovalDecision, ChatMessage, ExitPlanModeDecision } from '../../../core/types';
 import type ClaudianPlugin from '../../../main';
 import { ResumeSessionDropdown } from '../../../shared/components/ResumeSessionDropdown';
 import { InstructionModal } from '../../../shared/modals/InstructionConfirmModal';
-import { appendBrowserContext, type BrowserSelectionContext } from '../../../utils/browser';
-import { appendCanvasContext, type CanvasSelectionContext } from '../../../utils/canvas';
-import { appendCurrentNote } from '../../../utils/context';
+import type { BrowserSelectionContext } from '../../../utils/browser';
+import type { CanvasSelectionContext } from '../../../utils/canvas';
 import { formatDurationMmSs } from '../../../utils/date';
-import { appendEditorContext, type EditorSelectionContext } from '../../../utils/editor';
+import type { EditorSelectionContext } from '../../../utils/editor';
 import { appendMarkdownSnippet } from '../../../utils/markdown';
 import { COMPLETION_FLAVOR_WORDS } from '../constants';
 import { type InlineAskQuestionConfig, InlineAskUserQuestion } from '../rendering/InlineAskUserQuestion';
 import { InlineExitPlanMode } from '../rendering/InlineExitPlanMode';
 import type { MessageRenderer } from '../rendering/MessageRenderer';
 import { setToolIcon, updateToolCallResult } from '../rendering/ToolCallRenderer';
-import type { InstructionRefineService } from '../services/InstructionRefineService';
 import type { SubagentManager } from '../services/SubagentManager';
-import type { TitleGenerationService } from '../services/TitleGenerationService';
 import type { ChatState } from '../state/ChatState';
-import type { QueryOptions } from '../state/types';
 import type { AddExternalContextResult, FileContextManager, ImageContextManager, InstructionModeManager, McpServerSelector, StatusPanel } from '../ui';
 import type { BrowserSelectionController } from './BrowserSelectionController';
 import type { CanvasSelectionController } from './CanvasSelectionController';
@@ -62,7 +59,7 @@ export interface InputControllerDeps {
   getInputContainerEl: () => HTMLElement;
   generateId: () => string;
   resetInputHeight: () => void;
-  getAgentService?: () => ClaudianService | null;
+  getAgentService?: () => ChatRuntime | null;
   getSubagentManager: () => SubagentManager;
   /** Returns true if ready. */
   ensureServiceInitialized?: () => Promise<boolean>;
@@ -82,7 +79,7 @@ export class InputController {
     this.deps = deps;
   }
 
-  private getAgentService(): ClaudianService | null {
+  private getAgentService(): ChatRuntime | null {
     return this.deps.getAgentService?.() ?? null;
   }
 
@@ -202,7 +199,6 @@ export class InputController {
     // Slash commands are passed directly to SDK for handling
     // SDK handles expansion, $ARGUMENTS, @file references, and frontmatter options
     const displayContent = content;
-    let queryOptions: QueryOptions | undefined;
 
     const images = imageContextManager?.getAttachedImages() || [];
     const imagesForMessage = images.length > 0 ? [...images] : undefined;
@@ -223,56 +219,40 @@ export class InputController {
     const browserContext = browserContextOverride !== undefined
       ? browserContextOverride
       : (browserSelectionController?.getContext() ?? null);
+    const canvasContextOverride = options?.canvasContextOverride;
+    const canvasContext = canvasContextOverride !== undefined
+      ? canvasContextOverride
+      : canvasSelectionController.getContext();
 
     const externalContextPaths = externalContextSelector?.getExternalContexts();
     const isCompact = /^\/compact(\s|$)/i.test(content);
-
-    // User content first, context XML appended after (enables slash command detection)
-    let promptToSend = content;
-    let currentNoteForMessage: string | undefined;
-
-    // SDK built-in commands (e.g., /compact) must be sent bare — context XML breaks detection
-    if (!isCompact) {
-      // Append current note context if available
-      if (shouldSendCurrentNote && currentNotePath) {
-        promptToSend = appendCurrentNote(promptToSend, currentNotePath);
-        currentNoteForMessage = currentNotePath;
-      }
-
-      // Append editor context if available
-      if (editorContext) {
-        promptToSend = appendEditorContext(promptToSend, editorContext);
-      }
-
-      // Append browser selection context if available
-      if (browserContext) {
-        promptToSend = appendBrowserContext(promptToSend, browserContext);
-      }
-
-      // Append canvas selection context if available
-      const canvasContextOverride = options?.canvasContextOverride;
-      const canvasContext = canvasContextOverride !== undefined
-        ? canvasContextOverride
-        : canvasSelectionController.getContext();
-      if (canvasContext) {
-        promptToSend = appendCanvasContext(promptToSend, canvasContext);
-      }
-
-      // Transform context file mentions (e.g., @folder/file.ts) to absolute paths
-      if (fileContextManager) {
-        promptToSend = fileContextManager.transformContextMentions(promptToSend);
-      }
-    }
+    const transformedText = !isCompact && fileContextManager
+      ? fileContextManager.transformContextMentions(content)
+      : content;
+    const enabledMcpServers = mcpServerSelector?.getEnabledServers();
+    const turnRequest: ChatTurnRequest = {
+      text: transformedText,
+      images: imagesForMessage,
+      currentNotePath: shouldSendCurrentNote && currentNotePath ? currentNotePath : undefined,
+      editorSelection: editorContext,
+      browserSelection: browserContext,
+      canvasSelection: canvasContext,
+      externalContextPaths: externalContextPaths && externalContextPaths.length > 0
+        ? externalContextPaths
+        : undefined,
+      enabledMcpServers: enabledMcpServers && enabledMcpServers.size > 0
+        ? enabledMcpServers
+        : undefined,
+    };
 
     fileContextManager?.markCurrentNoteSent();
 
     const userMsg: ChatMessage = {
       id: this.deps.generateId(),
       role: 'user',
-      content: promptToSend,         // Full prompt with XML context (for history rebuild)
+      content: displayContent,
       displayContent,                // Original user input (for UI display)
       timestamp: Date.now(),
-      currentNote: currentNoteForMessage,
       images: imagesForMessage,
     };
     state.addMessage(userMsg);
@@ -303,30 +283,6 @@ export class InputController {
     );
     state.responseStartTime = performance.now();
 
-    // Extract @-mentioned MCP servers from prompt
-    const mcpMentions = plugin.mcpManager.extractMentions(promptToSend);
-
-    // Transform @mcpname to @mcpname MCP in API request only
-    promptToSend = plugin.mcpManager.transformMentions(promptToSend);
-
-    // Add MCP options to query
-    const enabledMcpServers = mcpServerSelector?.getEnabledServers();
-    if (mcpMentions.size > 0 || (enabledMcpServers && enabledMcpServers.size > 0)) {
-      queryOptions = {
-        ...queryOptions,
-        mcpMentions,
-        enabledMcpServers,
-      };
-    }
-
-    // Add external context paths to query
-    if (externalContextPaths && externalContextPaths.length > 0) {
-      queryOptions = {
-        ...queryOptions,
-        externalContextPaths,
-      };
-    }
-
     let wasInterrupted = false;
     let wasInvalidated = false;
     let didEnqueueToSdk = false;
@@ -354,7 +310,7 @@ export class InputController {
       const conv = plugin.getConversationSync(conversationIdForSend);
       if (conv?.resumeSessionAt) {
         if (this.isResumeSessionAtStillNeeded(conv.resumeSessionAt, state.messages.slice(0, -2))) {
-          agentService.setPendingResumeAt(conv.resumeSessionAt);
+          agentService.setResumeCheckpoint(conv.resumeSessionAt);
         } else {
           try {
             await plugin.updateConversation(conversationIdForSend, { resumeSessionAt: undefined });
@@ -366,10 +322,16 @@ export class InputController {
     }
 
     try {
+      const preparedTurn = agentService.prepareTurn(turnRequest);
+      userMsg.content = preparedTurn.persistedContent;
+      userMsg.currentNote = preparedTurn.isCompact
+        ? undefined
+        : preparedTurn.request.currentNotePath;
+
       // Pass history WITHOUT current turn (userMsg + assistantMsg we just added)
       // This prevents duplication when rebuilding context for new sessions
       const previousMessages = state.messages.slice(0, -2);
-      for await (const chunk of agentService.query(promptToSend, imagesForMessage, previousMessages, queryOptions)) {
+      for await (const chunk of agentService.query(preparedTurn, previousMessages)) {
         if (chunk.type === 'sdk_user_uuid') {
           userMsg.sdkUserUuid = chunk.uuid;
           continue;

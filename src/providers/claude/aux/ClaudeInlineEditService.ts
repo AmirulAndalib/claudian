@@ -1,8 +1,14 @@
 import type { HookCallbackMatcher, Options } from '@anthropic-ai/claude-agent-sdk';
 import { query as agentQuery } from '@anthropic-ai/claude-agent-sdk';
 
-import { getInlineEditSystemPrompt } from '../../core/prompts/inlineEdit';
-import { getPathFromToolInput } from '../../core/tools/toolInput';
+import type {
+  InlineEditCursorRequest,
+  InlineEditMode,
+  InlineEditRequest,
+  InlineEditResult,
+  InlineEditSelectionRequest,
+} from '../../../core/providers/types';
+import { getPathFromToolInput } from '../../../core/tools/toolInput';
 import {
   isReadOnlyTool,
   READ_ONLY_TOOLS,
@@ -10,43 +16,21 @@ import {
   TOOL_GREP,
   TOOL_LS,
   TOOL_READ,
-} from '../../core/tools/toolNames';
-import { isAdaptiveThinkingModel, THINKING_BUDGETS } from '../../core/types';
-import type ClaudianPlugin from '../../main';
-import { appendContextFiles } from '../../utils/context';
-import { type CursorContext } from '../../utils/editor';
-import { getEnhancedPath, getMissingNodeError, parseEnvironmentVariables } from '../../utils/env';
-import { getPathAccessType, getVaultPath, type PathAccessType } from '../../utils/path';
+} from '../../../core/tools/toolNames';
+import { isAdaptiveThinkingModel, THINKING_BUDGETS } from '../../../core/types';
+import type ClaudianPlugin from '../../../main';
+import { appendContextFiles } from '../../../utils/context';
+import { getEnhancedPath, getMissingNodeError, parseEnvironmentVariables } from '../../../utils/env';
+import { getPathAccessType, getVaultPath, type PathAccessType } from '../../../utils/path';
+import { getInlineEditSystemPrompt } from '../prompt';
 
-export type InlineEditMode = 'selection' | 'cursor';
-
-export interface InlineEditSelectionRequest {
-  mode: 'selection';
-  instruction: string;
-  notePath: string;
-  selectedText: string;
-  startLine?: number;  // 1-indexed
-  lineCount?: number;
-  contextFiles?: string[];
-}
-
-export interface InlineEditCursorRequest {
-  mode: 'cursor';
-  instruction: string;
-  notePath: string;
-  cursorContext: CursorContext;
-  contextFiles?: string[];
-}
-
-export type InlineEditRequest = InlineEditSelectionRequest | InlineEditCursorRequest;
-
-export interface InlineEditResult {
-  success: boolean;
-  editedText?: string;      // replacement (selection mode)
-  insertedText?: string;    // insertion (cursor mode)
-  clarification?: string;
-  error?: string;
-}
+export type {
+  InlineEditCursorRequest,
+  InlineEditMode,
+  InlineEditRequest,
+  InlineEditResult,
+  InlineEditSelectionRequest,
+};
 
 /** Parses response text for <replacement> or <insertion> tag. */
 export function parseInlineEditResponse(responseText: string): InlineEditResult {

@@ -1,6 +1,7 @@
 import type { Component, WorkspaceLeaf } from 'obsidian';
 
-import type { ClaudianService } from '../../../core/agent';
+import type { InstructionRefineService, TitleGenerationService } from '../../../core/providers';
+import type { ChatRuntime } from '../../../core/runtime';
 import type { SlashCommandDropdown } from '../../../shared/components/SlashCommandDropdown';
 import type {
   BrowserSelectionController,
@@ -12,9 +13,7 @@ import type {
   StreamController,
 } from '../controllers';
 import type { MessageRenderer } from '../rendering';
-import type { InstructionRefineService } from '../services/InstructionRefineService';
 import type { SubagentManager } from '../services/SubagentManager';
-import type { TitleGenerationService } from '../services/TitleGenerationService';
 import type { ChatState } from '../state';
 import type {
   BangBashModeManager,
@@ -35,7 +34,7 @@ import type { NavigationSidebar } from '../ui';
  * Default number of tabs allowed.
  *
  * Set to 3 to balance usability with resource usage:
- * - Each tab has its own ClaudianService and persistent query
+ * - Each tab has its own chat runtime and persistent query
  * - More tabs = more memory and potential SDK processes
  * - 3 tabs allows multi-tasking without excessive overhead
  */
@@ -170,7 +169,7 @@ export interface TabDOMElements {
 
 /**
  * Represents a single tab in the multi-tab system.
- * Each tab is an independent chat session with its own agent service.
+ * Each tab is an independent chat session with its own runtime instance.
  */
 export interface TabData {
   /** Unique tab identifier. */
@@ -179,8 +178,8 @@ export interface TabData {
   /** Conversation ID bound to this tab (null for new/empty tabs). */
   conversationId: string | null;
 
-  /** Per-tab ClaudianService instance for independent streaming. */
-  service: ClaudianService | null;
+  /** Per-tab chat runtime instance for independent streaming. */
+  service: ChatRuntime | null;
 
   /** Whether the service has been initialized (lazy start). */
   serviceInitialized: boolean;

@@ -29,13 +29,13 @@ class MockResizeObserver {
 }
 global.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver;
 
-// Mock ClaudianService
-jest.mock('@/core/agent', () => ({
-  ClaudianService: jest.fn().mockImplementation(() => ({
+// Mock provider runtime used by ProviderRegistry
+jest.mock('@/providers/claude/runtime', () => ({
+  ClaudeChatRuntime: jest.fn().mockImplementation(() => ({
     ensureReady: jest.fn().mockResolvedValue(true),
-    closePersistentQuery: jest.fn(),
+    cleanup: jest.fn(),
     isReady: jest.fn().mockReturnValue(false),
-    applyForkState: jest.fn((conv: any) => conv.sessionId ?? conv.forkSource?.sessionId ?? null),
+    syncConversationState: jest.fn(),
     onReadyStateChange: jest.fn((listener: (ready: boolean) => void) => {
       listener(false);
       return () => {};
@@ -107,12 +107,13 @@ const createMockModelSelector = () => ({
 
 const createMockClaudianService = (overrides?: {
   ensureReady?: jest.Mock;
+  syncConversationState?: jest.Mock;
   onReadyStateChange?: jest.Mock;
 }) => ({
   ensureReady: overrides?.ensureReady ?? jest.fn().mockResolvedValue(true),
-  closePersistentQuery: jest.fn(),
+  cleanup: jest.fn(),
   isReady: jest.fn().mockReturnValue(false),
-  applyForkState: jest.fn((conv: any) => conv.sessionId ?? conv.forkSource?.sessionId ?? null),
+  syncConversationState: overrides?.syncConversationState ?? jest.fn(),
   onReadyStateChange: overrides?.onReadyStateChange ?? jest.fn((listener: (ready: boolean) => void) => {
     listener(false);
     return () => {};
@@ -290,13 +291,13 @@ jest.mock('@/features/chat/services/SubagentManager', () => ({
   })),
 }));
 
-jest.mock('@/features/chat/services/InstructionRefineService', () => ({
+jest.mock('@/providers/claude/aux/ClaudeInstructionRefineService', () => ({
   InstructionRefineService: jest.fn().mockImplementation(() => ({
     cancel: jest.fn(),
   })),
 }));
 
-jest.mock('@/features/chat/services/TitleGenerationService', () => ({
+jest.mock('@/providers/claude/aux/ClaudeTitleGenerationService', () => ({
   TitleGenerationService: jest.fn().mockImplementation(() => ({
     cancel: jest.fn(),
   })),
@@ -475,8 +476,8 @@ describe('Tab - Service Initialization', () => {
 
     it('should ensureReady without session ID (just spin up process)', async () => {
       const mockEnsureReady = jest.fn().mockResolvedValue(true);
-      const agentModule = jest.requireMock('@/core/agent') as { ClaudianService: jest.Mock };
-      agentModule.ClaudianService.mockImplementationOnce(() => createMockClaudianService({ ensureReady: mockEnsureReady }));
+      const runtimeModule = jest.requireMock('@/providers/claude/runtime') as { ClaudeChatRuntime: jest.Mock };
+      runtimeModule.ClaudeChatRuntime.mockImplementationOnce(() => createMockClaudianService({ ensureReady: mockEnsureReady }));
 
       const options = createMockOptions();
       const tab = createTab(options);
@@ -489,10 +490,12 @@ describe('Tab - Service Initialization', () => {
       });
     });
 
-    it('should ensureReady with saved external contexts for existing conversation', async () => {
-      const mockEnsureReady = jest.fn().mockResolvedValue(true);
-      const agentModule = jest.requireMock('@/core/agent') as { ClaudianService: jest.Mock };
-      agentModule.ClaudianService.mockImplementationOnce(() => createMockClaudianService({ ensureReady: mockEnsureReady }));
+    it('should sync existing conversations with saved external contexts', async () => {
+      const mockSyncConversationState = jest.fn();
+      const runtimeModule = jest.requireMock('@/providers/claude/runtime') as { ClaudeChatRuntime: jest.Mock };
+      runtimeModule.ClaudeChatRuntime.mockImplementationOnce(() => createMockClaudianService({
+        syncConversationState: mockSyncConversationState,
+      }));
 
       const conversation = {
         id: 'conv-1',
@@ -513,10 +516,7 @@ describe('Tab - Service Initialization', () => {
 
       await initializeTabService(tab, options.plugin, options.mcpManager);
 
-      expect(mockEnsureReady).toHaveBeenCalledWith({
-        sessionId: 'session-123',
-        externalContextPaths: ['/saved/path'],
-      });
+      expect(mockSyncConversationState).toHaveBeenCalledWith(conversation, ['/saved/path']);
     });
 
     it('should sync model selector ready state with service readiness', async () => {
@@ -525,8 +525,8 @@ describe('Tab - Service Initialization', () => {
         return () => {};
       });
 
-      const agentModule = jest.requireMock('@/core/agent') as { ClaudianService: jest.Mock };
-      agentModule.ClaudianService.mockImplementationOnce(() => createMockClaudianService({ onReadyStateChange: mockOnReadyStateChange }));
+      const runtimeModule = jest.requireMock('@/providers/claude/runtime') as { ClaudeChatRuntime: jest.Mock };
+      runtimeModule.ClaudeChatRuntime.mockImplementationOnce(() => createMockClaudianService({ onReadyStateChange: mockOnReadyStateChange }));
 
       const options = createMockOptions();
       const tab = createTab(options);
@@ -652,8 +652,8 @@ describe('Tab - Destruction', () => {
       const unsubscribeFn = jest.fn();
       const mockOnReadyStateChange = jest.fn(() => unsubscribeFn);
 
-      const agentModule = jest.requireMock('@/core/agent') as { ClaudianService: jest.Mock };
-      agentModule.ClaudianService.mockImplementationOnce(() => createMockClaudianService({ onReadyStateChange: mockOnReadyStateChange }));
+      const runtimeModule = jest.requireMock('@/providers/claude/runtime') as { ClaudeChatRuntime: jest.Mock };
+      runtimeModule.ClaudeChatRuntime.mockImplementationOnce(() => createMockClaudianService({ onReadyStateChange: mockOnReadyStateChange }));
 
       const options = createMockOptions();
       const tab = createTab(options);
@@ -668,18 +668,18 @@ describe('Tab - Destruction', () => {
       expect(unsubscribeFn).toHaveBeenCalled();
     });
 
-    it('should close service persistent query', async () => {
-      const mockClosePersistentQuery = jest.fn();
+    it('should cleanup the runtime service', async () => {
+      const mockCleanup = jest.fn();
       const options = createMockOptions();
       const tab = createTab(options);
 
       tab.service = {
-        closePersistentQuery: mockClosePersistentQuery,
+        cleanup: mockCleanup,
       } as any;
 
       await destroyTab(tab);
 
-      expect(mockClosePersistentQuery).toHaveBeenCalledWith('tab closed');
+      expect(mockCleanup).toHaveBeenCalled();
       expect(tab.service).toBeNull();
     });
 
@@ -2139,6 +2139,7 @@ describe('Tab - handleForkRequest', () => {
     // Service has a session ID
     tab.service = {
       getSessionId: jest.fn().mockReturnValue('session-abc'),
+      resolveSessionIdForFork: jest.fn().mockReturnValue('session-abc'),
     } as any;
     tab.conversationId = 'conv-1';
 
@@ -2194,7 +2195,7 @@ describe('Tab - handleForkRequest', () => {
       { id: 'u1', role: 'user', content: 'hello', timestamp: 2, sdkUserUuid: 'user-u' },
       { id: 'a1', role: 'assistant', content: 'resp', timestamp: 3, sdkAssistantUuid: 'asst-1' },
     ];
-    tab.service = { getSessionId: jest.fn().mockReturnValue('session-1') } as any;
+    tab.service = { getSessionId: jest.fn().mockReturnValue('session-1'), resolveSessionIdForFork: jest.fn().mockReturnValue('session-1') } as any;
     tab.conversationId = 'conv-1';
 
     await forkCallback('u1');
@@ -2215,7 +2216,7 @@ describe('Tab - handleForkRequest', () => {
       { id: 'u1', role: 'user', content: 'hello', timestamp: 1, sdkUserUuid: 'user-u1' },
       { id: 'a1', role: 'assistant', content: 'hi', timestamp: 2, sdkAssistantUuid: 'asst-1' },
     ];
-    tab.service = { getSessionId: jest.fn().mockReturnValue('session-1') } as any;
+    tab.service = { getSessionId: jest.fn().mockReturnValue('session-1'), resolveSessionIdForFork: jest.fn().mockReturnValue('session-1') } as any;
     tab.conversationId = 'conv-1';
 
     await forkCallback('u1');
@@ -2264,7 +2265,7 @@ describe('Tab - handleForkRequest', () => {
       { id: 'u1', role: 'user', content: 'hello', timestamp: 2, sdkUserUuid: 'user-u' },
       { id: 'a1', role: 'assistant', content: 'resp', timestamp: 3, sdkAssistantUuid: 'asst-1' },
     ];
-    tab.service = { getSessionId: jest.fn().mockReturnValue('service-session') } as any;
+    tab.service = { getSessionId: jest.fn().mockReturnValue('service-session'), resolveSessionIdForFork: jest.fn().mockReturnValue('service-session') } as any;
     tab.conversationId = 'conv-1';
 
     await forkCallback('u1');
@@ -2285,7 +2286,7 @@ describe('Tab - handleForkRequest', () => {
       { id: 'u1', role: 'user', content: 'hello', timestamp: 2, sdkUserUuid: 'user-u1' },
       { id: 'a1', role: 'assistant', content: 'resp', timestamp: 3, sdkAssistantUuid: 'asst-1' },
     ];
-    tab.service = { getSessionId: jest.fn().mockReturnValue('session-1') } as any;
+    tab.service = { getSessionId: jest.fn().mockReturnValue('session-1'), resolveSessionIdForFork: jest.fn().mockReturnValue('session-1') } as any;
     tab.conversationId = 'conv-1';
 
     await forkCallback('u1');
@@ -2351,7 +2352,7 @@ describe('Tab - handleForkAll (via /fork command)', () => {
       { id: 'u2', role: 'user', content: 'world', timestamp: 4, sdkUserUuid: 'user-u2' },
       { id: 'a2', role: 'assistant', content: 'resp2', timestamp: 5, sdkAssistantUuid: 'asst-2' },
     ];
-    tab.service = { getSessionId: jest.fn().mockReturnValue('session-abc') } as any;
+    tab.service = { getSessionId: jest.fn().mockReturnValue('session-abc'), resolveSessionIdForFork: jest.fn().mockReturnValue('session-abc') } as any;
     tab.conversationId = 'conv-1';
 
     await onForkAll();
@@ -2387,7 +2388,7 @@ describe('Tab - handleForkAll (via /fork command)', () => {
       { id: 'u3', role: 'user', content: 'more', timestamp: 6, sdkUserUuid: 'user-u3' },
       { id: 'int-1', role: 'user', content: '[Request interrupted by user]', timestamp: 7, sdkUserUuid: 'user-int', isInterrupt: true },
     ];
-    tab.service = { getSessionId: jest.fn().mockReturnValue('session-abc') } as any;
+    tab.service = { getSessionId: jest.fn().mockReturnValue('session-abc'), resolveSessionIdForFork: jest.fn().mockReturnValue('session-abc') } as any;
     tab.conversationId = 'conv-1';
 
     await onForkAll();
@@ -2496,7 +2497,7 @@ describe('Tab - handleForkAll (via /fork command)', () => {
       { id: 'u1', role: 'user', content: 'hello', timestamp: 2, sdkUserUuid: 'user-u' },
       { id: 'a1', role: 'assistant', content: 'resp', timestamp: 3, sdkAssistantUuid: 'asst-1' },
     ];
-    tab.service = { getSessionId: jest.fn().mockReturnValue('session-1') } as any;
+    tab.service = { getSessionId: jest.fn().mockReturnValue('session-1'), resolveSessionIdForFork: jest.fn().mockReturnValue('session-1') } as any;
     tab.conversationId = 'conv-1';
 
     await onForkAll();

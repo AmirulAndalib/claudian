@@ -1,6 +1,6 @@
 import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 
-import { MessageChannel } from '@/core/agent/MessageChannel';
+import { MessageChannel } from '@/providers/claude/runtime/ClaudeMessageChannel';
 
 // Helper to create SDK-format text user message
 function createTextUserMessage(content: string): SDKUserMessage {

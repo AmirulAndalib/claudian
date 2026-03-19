@@ -1,4 +1,4 @@
-import type { ClaudianService } from '../../../core/agent';
+import type { ChatRuntime } from '../../../core/runtime';
 import { extractResolvedAnswers, extractResolvedAnswersFromResultText, parseTodoInput } from '../../../core/tools';
 import {
   isSubagentToolName,
@@ -15,8 +15,6 @@ import type { SDKToolUseResult } from '../../../core/types/diff';
 import type ClaudianPlugin from '../../../main';
 import { formatDurationMmSs } from '../../../utils/date';
 import { extractDiffData } from '../../../utils/diff';
-import { getVaultPath } from '../../../utils/path';
-import { loadSubagentFinalResult, loadSubagentToolCalls } from '../../../utils/sdkSession';
 import { FLAVOR_TEXTS } from '../constants';
 import {
   appendThinkingContent,
@@ -45,7 +43,7 @@ export interface StreamControllerDeps {
   getFileContextManager: () => FileContextManager | null;
   updateQueueIndicator: () => void;
   /** Get the agent service from the tab. */
-  getAgentService?: () => ClaudianService | null;
+  getAgentService?: () => ChatRuntime | null;
 }
 
 export class StreamController {
@@ -699,16 +697,12 @@ export class StreamController {
     const asyncStatus = subagent.asyncStatus ?? subagent.status;
     if (asyncStatus !== 'completed' && asyncStatus !== 'error') return;
 
-    const sessionId = this.deps.getAgentService?.()?.getSessionId();
-    if (!sessionId) return;
-
-    const vaultPath = getVaultPath(this.deps.plugin.app);
-    if (!vaultPath) return;
+    const runtime = this.deps.getAgentService?.();
+    if (!runtime) return;
 
     const { hasHydrated, finalResultHydrated } = await this.tryHydrateAsyncSubagent(
       subagent,
-      vaultPath,
-      sessionId,
+      runtime,
       true
     );
 
@@ -717,23 +711,20 @@ export class StreamController {
     }
 
     if (!finalResultHydrated) {
-      this.scheduleAsyncSubagentResultRetry(subagent, vaultPath, sessionId, 0);
+      this.scheduleAsyncSubagentResultRetry(subagent, runtime, 0);
     }
   }
 
   private async tryHydrateAsyncSubagent(
     subagent: SubagentInfo,
-    vaultPath: string,
-    sessionId: string,
+    runtime: ChatRuntime,
     hydrateToolCalls: boolean
   ): Promise<{ hasHydrated: boolean; finalResultHydrated: boolean }> {
     let hasHydrated = false;
     let finalResultHydrated = false;
 
     if (hydrateToolCalls && !subagent.toolCalls?.length) {
-      const recoveredToolCalls = await loadSubagentToolCalls(
-        vaultPath,
-        sessionId,
+      const recoveredToolCalls = await runtime.loadSubagentToolCalls(
         subagent.agentId || ''
       );
       if (recoveredToolCalls.length > 0) {
@@ -745,9 +736,7 @@ export class StreamController {
       }
     }
 
-    const recoveredFinalResult = await loadSubagentFinalResult(
-      vaultPath,
-      sessionId,
+    const recoveredFinalResult = await runtime.loadSubagentFinalResult(
       subagent.agentId || ''
     );
     if (recoveredFinalResult && recoveredFinalResult.trim().length > 0) {
@@ -763,8 +752,7 @@ export class StreamController {
 
   private scheduleAsyncSubagentResultRetry(
     subagent: SubagentInfo,
-    vaultPath: string,
-    sessionId: string,
+    runtime: ChatRuntime,
     attempt: number
   ): void {
     if (!subagent.agentId) return;
@@ -772,14 +760,13 @@ export class StreamController {
 
     const delay = StreamController.ASYNC_SUBAGENT_RESULT_RETRY_DELAYS_MS[attempt];
     setTimeout(() => {
-      void this.retryAsyncSubagentResult(subagent, vaultPath, sessionId, attempt);
+      void this.retryAsyncSubagentResult(subagent, runtime, attempt);
     }, delay);
   }
 
   private async retryAsyncSubagentResult(
     subagent: SubagentInfo,
-    vaultPath: string,
-    sessionId: string,
+    runtime: ChatRuntime,
     attempt: number
   ): Promise<void> {
     if (!subagent.agentId) return;
@@ -788,8 +775,7 @@ export class StreamController {
 
     const { hasHydrated, finalResultHydrated } = await this.tryHydrateAsyncSubagent(
       subagent,
-      vaultPath,
-      sessionId,
+      runtime,
       false
     );
     if (hasHydrated) {
@@ -797,7 +783,7 @@ export class StreamController {
     }
 
     if (!finalResultHydrated) {
-      this.scheduleAsyncSubagentResultRetry(subagent, vaultPath, sessionId, attempt + 1);
+      this.scheduleAsyncSubagentResultRetry(subagent, runtime, attempt + 1);
     }
   }
 

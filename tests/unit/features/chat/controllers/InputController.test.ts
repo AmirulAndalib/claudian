@@ -3,6 +3,7 @@ import { Notice } from 'obsidian';
 
 import { InputController, type InputControllerDeps } from '@/features/chat/controllers/InputController';
 import { ChatState } from '@/features/chat/state/ChatState';
+import { encodeClaudeTurn } from '@/providers/claude/prompt/ClaudeTurnEncoder';
 import { ResumeSessionDropdown } from '@/shared/components/ResumeSessionDropdown';
 
 jest.mock('@/shared/components/ResumeSessionDropdown', () => ({
@@ -54,11 +55,20 @@ async function* createMockStream(chunks: any[]) {
   }
 }
 
+const mockMcpForEncoder = {
+  extractMentions: jest.fn().mockReturnValue(new Set<string>()),
+  transformMentions: jest.fn().mockImplementation((text: string) => text),
+};
+
 function createMockAgentService() {
   return {
+    prepareTurn: jest.fn().mockImplementation((request: any) =>
+      encodeClaudeTurn(request, mockMcpForEncoder),
+    ),
     query: jest.fn(),
     cancel: jest.fn(),
     resetSession: jest.fn(),
+    setResumeCheckpoint: jest.fn(),
     setApprovedPlanContent: jest.fn(),
     setCurrentPlanFilePath: jest.fn(),
     getApprovedPlanContent: jest.fn().mockReturnValue(null),
@@ -425,6 +435,27 @@ describe('InputController - Message Queue', () => {
       expect(deps.state.isStreaming).toBe(false);
     });
 
+    it('should persist replay-safe user content instead of transport-only prompt', async () => {
+      deps = createSendableDeps();
+      (deps as any).mockAgentService.prepareTurn = jest.fn().mockReturnValue({
+        request: { text: '@server-a hello' },
+        persistedContent: '@server-a hello',
+        prompt: '@server-a MCP hello',
+        isCompact: false,
+        mcpMentions: new Set(['server-a']),
+      });
+      (deps as any).mockAgentService.query = jest.fn().mockImplementation(() => createMockStream([{ type: 'done' }]));
+
+      inputEl = deps.getInputEl() as ReturnType<typeof createMockInputEl>;
+      inputEl.value = '@server-a hello';
+      controller = new InputController(deps);
+
+      await controller.sendMessage();
+
+      expect(deps.state.messages[0].content).toBe('@server-a hello');
+      expect(deps.state.messages[0].content).not.toBe('@server-a MCP hello');
+    });
+
     it('should prepend current note only once per session', async () => {
       const prompts: string[] = [];
       let currentNoteSent = false;
@@ -437,8 +468,8 @@ describe('InputController - Message Queue', () => {
       };
 
       deps.getFileContextManager = () => fileContextManager as any;
-      (deps as any).mockAgentService.query = jest.fn().mockImplementation((prompt: string) => {
-        prompts.push(prompt);
+      (deps as any).mockAgentService.query = jest.fn().mockImplementation((turn: any) => {
+        prompts.push(turn.prompt);
         return createMockStream([{ type: 'done' }]);
       });
 
@@ -452,11 +483,41 @@ describe('InputController - Message Queue', () => {
       expect(prompts[1]).not.toContain('<current_note>');
     });
 
+    it('should not persist currentNote metadata for /compact turns', async () => {
+      const fileContextManager = {
+        startSession: jest.fn(),
+        getCurrentNotePath: jest.fn().mockReturnValue('notes/session.md'),
+        shouldSendCurrentNote: jest.fn().mockReturnValue(true),
+        markCurrentNoteSent: jest.fn(),
+        transformContextMentions: jest.fn().mockImplementation((text: string) => text),
+      };
+
+      deps = createSendableDeps({
+        getFileContextManager: () => fileContextManager as any,
+      });
+      (deps as any).mockAgentService.query = jest.fn().mockImplementation(() => createMockStream([{ type: 'done' }]));
+
+      inputEl = deps.getInputEl() as ReturnType<typeof createMockInputEl>;
+      inputEl.value = '/compact';
+      controller = new InputController(deps);
+
+      await controller.sendMessage();
+
+      expect(deps.state.messages[0].content).toBe('/compact');
+      expect(deps.state.messages[0].currentNote).toBeUndefined();
+    });
+
     it('should include MCP options in query when mentions are present', async () => {
       const mcpMentions = new Set(['server-a']);
       const enabledServers = new Set(['server-b']);
 
-      deps.plugin.mcpManager.extractMentions = jest.fn().mockReturnValue(mcpMentions);
+      (deps as any).mockAgentService.prepareTurn = jest.fn().mockImplementation((request: any) => ({
+        request,
+        persistedContent: request.text,
+        prompt: request.text,
+        isCompact: false,
+        mcpMentions,
+      }));
       deps.getMcpServerSelector = () => ({
         getEnabledServers: () => enabledServers,
       }) as any;
@@ -466,10 +527,10 @@ describe('InputController - Message Queue', () => {
 
       await controller.sendMessage();
 
+      const prepareTurnCall = ((deps as any).mockAgentService.prepareTurn as jest.Mock).mock.calls[0];
+      expect(prepareTurnCall[0].enabledMcpServers).toBe(enabledServers);
       const queryCall = ((deps as any).mockAgentService.query as jest.Mock).mock.calls[0];
-      const queryOptions = queryCall[3];
-      expect(queryOptions.mcpMentions).toBe(mcpMentions);
-      expect(queryOptions.enabledMcpServers).toBe(enabledServers);
+      expect(queryCall[0].mcpMentions).toBe(mcpMentions);
     });
 
     it('should append browser selection context when available', async () => {
@@ -486,9 +547,9 @@ describe('InputController - Message Queue', () => {
       });
       const localController = new InputController(localDeps);
 
-      mockAgentService.query.mockImplementation((prompt: string) => {
-        expect(prompt).toContain('<browser_selection source="surfing-view" title="Surfing">');
-        expect(prompt).toContain('selected from browser');
+      mockAgentService.query.mockImplementation((turn: any) => {
+        expect(turn.prompt).toContain('<browser_selection source="surfing-view" title="Surfing">');
+        expect(turn.prompt).toContain('selected from browser');
         return createMockStream([{ type: 'done' }]);
       });
 
@@ -1442,9 +1503,8 @@ describe('InputController - Message Queue', () => {
 
       await controller.sendMessage();
 
-      const queryCall = ((deps as any).mockAgentService.query as jest.Mock).mock.calls[0];
-      const queryOptions = queryCall[3];
-      expect(queryOptions.externalContextPaths).toEqual(externalPaths);
+      const prepareTurnCall = ((deps as any).mockAgentService.prepareTurn as jest.Mock).mock.calls[0];
+      expect(prepareTurnCall[0].externalContextPaths).toEqual(externalPaths);
     });
   });
 
@@ -1470,7 +1530,7 @@ describe('InputController - Message Queue', () => {
       await controller.sendMessage();
 
       const queryCall = ((deps as any).mockAgentService.query as jest.Mock).mock.calls[0];
-      const promptSent = queryCall[0];
+      const promptSent = queryCall[0].prompt;
       expect(promptSent).toContain('selected text content');
       expect(promptSent).toContain('test/note.md');
     });
@@ -1497,7 +1557,7 @@ describe('InputController - Message Queue', () => {
       await controller.sendMessage();
 
       const queryCall = ((deps as any).mockAgentService.query as jest.Mock).mock.calls[0];
-      const promptSent = queryCall[0];
+      const promptSent = queryCall[0].prompt;
       expect(promptSent).toContain('<editor_selection path="test/note.md">\n  selected text\nsecond line  \n</editor_selection>');
       expect(promptSent).not.toContain('lines=');
     });
@@ -1992,10 +2052,10 @@ describe('InputController - Message Queue', () => {
       mockNotice.mockClear();
     });
 
-    it('should call setPendingResumeAt when resumeSessionAt points to last assistant (still-needed)', async () => {
+    it('should call setResumeCheckpoint when resumeSessionAt points to last assistant (still-needed)', async () => {
       deps = createSendableDeps();
       const { mockAgentService } = deps as any;
-      mockAgentService.setPendingResumeAt = jest.fn();
+      mockAgentService.setResumeCheckpoint = jest.fn();
       mockAgentService.query = jest.fn().mockReturnValue(createMockStream([{ type: 'done' }]));
 
       // Pre-populate messages: user → assistant (with sdkAssistantUuid matching resumeSessionAt)
@@ -2016,15 +2076,15 @@ describe('InputController - Message Queue', () => {
 
       await controller.sendMessage();
 
-      expect(mockAgentService.setPendingResumeAt).toHaveBeenCalledWith('a1');
+      expect(mockAgentService.setResumeCheckpoint).toHaveBeenCalledWith('a1');
       // Should NOT clear metadata eagerly (clearing is done by save(true))
       expect(deps.plugin.updateConversation).not.toHaveBeenCalledWith('conv-1', { resumeSessionAt: undefined });
     });
 
-    it('should NOT call setPendingResumeAt when follow-up already exists (stale)', async () => {
+    it('should NOT call setResumeCheckpoint when follow-up already exists (stale)', async () => {
       deps = createSendableDeps();
       const { mockAgentService } = deps as any;
-      mockAgentService.setPendingResumeAt = jest.fn();
+      mockAgentService.setResumeCheckpoint = jest.fn();
       mockAgentService.query = jest.fn().mockReturnValue(createMockStream([{ type: 'done' }]));
 
       // Messages: user → assistant(a1) → user(follow-up) → assistant
@@ -2047,7 +2107,7 @@ describe('InputController - Message Queue', () => {
 
       await controller.sendMessage();
 
-      expect(mockAgentService.setPendingResumeAt).not.toHaveBeenCalled();
+      expect(mockAgentService.setResumeCheckpoint).not.toHaveBeenCalled();
       // Should clear stale metadata
       expect(deps.plugin.updateConversation).toHaveBeenCalledWith('conv-1', { resumeSessionAt: undefined });
     });
@@ -2055,7 +2115,7 @@ describe('InputController - Message Queue', () => {
     it('should clear resumeSessionAt on save when sdk_user_sent is received', async () => {
       deps = createSendableDeps();
       const { mockAgentService } = deps as any;
-      mockAgentService.setPendingResumeAt = jest.fn();
+      mockAgentService.setResumeCheckpoint = jest.fn();
       mockAgentService.query = jest.fn().mockReturnValue(
         createMockStream([
           { type: 'sdk_user_uuid', uuid: 'u-new' },
@@ -2088,7 +2148,7 @@ describe('InputController - Message Queue', () => {
     it('should NOT clear resumeSessionAt on save when query fails before enqueue', async () => {
       deps = createSendableDeps();
       const { mockAgentService } = deps as any;
-      mockAgentService.setPendingResumeAt = jest.fn();
+      mockAgentService.setResumeCheckpoint = jest.fn();
       // Stream throws before yielding sdk_user_sent
       mockAgentService.query = jest.fn().mockImplementation(() => {
         throw new Error('Connection failed');
@@ -2117,7 +2177,7 @@ describe('InputController - Message Queue', () => {
     it('should not block send when stale metadata clear fails', async () => {
       deps = createSendableDeps();
       const { mockAgentService } = deps as any;
-      mockAgentService.setPendingResumeAt = jest.fn();
+      mockAgentService.setResumeCheckpoint = jest.fn();
       mockAgentService.query = jest.fn().mockReturnValue(createMockStream([{ type: 'done' }]));
 
       deps.state.messages = [

@@ -13,14 +13,14 @@ import * as fs from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
 
-import { extractToolResultContent } from '../core/sdk/toolResultContent';
-import { extractResolvedAnswers, extractResolvedAnswersFromResultText } from '../core/tools';
-import { isSubagentToolName, TOOL_ASK_USER_QUESTION } from '../core/tools/toolNames';
-import type { ChatMessage, ContentBlock, ImageAttachment, ImageMediaType, SubagentInfo, ToolCallInfo } from '../core/types';
-import { extractContentBeforeXmlContext } from './context';
-import { extractDiffData } from './diff';
-import { isCompactionCanceledStderr, isInterruptSignalText } from './interrupt';
-import { extractFinalResultFromSubagentJsonl } from './subagentJsonl';
+import { extractToolResultContent } from '../../../core/sdk/toolResultContent';
+import { extractResolvedAnswers, extractResolvedAnswersFromResultText } from '../../../core/tools';
+import { isSubagentToolName, TOOL_ASK_USER_QUESTION } from '../../../core/tools/toolNames';
+import type { ChatMessage, ContentBlock, ImageAttachment, ImageMediaType, SubagentInfo, ToolCallInfo } from '../../../core/types';
+import { extractContentBeforeXmlContext } from '../../../utils/context';
+import { extractDiffData } from '../../../utils/diff';
+import { isCompactionCanceledStderr, isInterruptSignalText } from '../../../utils/interrupt';
+import { extractFinalResultFromSubagentJsonl } from '../../../utils/subagentJsonl';
 
 export interface SDKSessionReadResult {
   messages: SDKNativeMessage[];

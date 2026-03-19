@@ -1,5 +1,6 @@
 import type { EditorView } from '@codemirror/view';
 
+import type { ChatRuntimeQueryOptions } from '../../../core/runtime';
 import type { TodoItem } from '../../../core/tools';
 import type {
   ChatMessage,
@@ -119,14 +120,7 @@ export interface ChatStateCallbacks {
 }
 
 /** Options for query execution. */
-export interface QueryOptions {
-  allowedTools?: string[];
-  model?: string;
-  mcpMentions?: Set<string>;
-  enabledMcpServers?: Set<string>;
-  forceColdStart?: boolean;
-  externalContextPaths?: string[];
-}
+export type QueryOptions = ChatRuntimeQueryOptions;
 
 // Re-export types that are used across the chat feature
 export type {

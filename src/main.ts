@@ -33,17 +33,17 @@ import { ClaudianView } from './features/chat/ClaudianView';
 import { type InlineEditContext, InlineEditModal } from './features/inline-edit/ui/InlineEditModal';
 import { ClaudianSettingTab } from './features/settings/ClaudianSettings';
 import { setLocale } from './i18n';
-import { ClaudeCliResolver } from './utils/claudeCli';
-import { buildCursorContext } from './utils/editor';
-import { getCurrentModelFromEnvironment, getModelsFromEnvironment, parseEnvironmentVariables } from './utils/env';
-import { getVaultPath } from './utils/path';
 import {
   deleteSDKSession,
   loadSDKSessionMessages,
   loadSubagentToolCalls,
   sdkSessionExists,
   type SDKSessionLoadResult,
-} from './utils/sdkSession';
+} from './providers/claude/history/ClaudeHistoryStore';
+import { ClaudeCliResolver } from './providers/claude/runtime/ClaudeCliResolver';
+import { buildCursorContext } from './utils/editor';
+import { getCurrentModelFromEnvironment, getModelsFromEnvironment, parseEnvironmentVariables } from './utils/env';
+import { getVaultPath } from './utils/path';
 
 /**
  * Main plugin class for Claudian.

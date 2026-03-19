@@ -4,6 +4,8 @@ import { Decoration, EditorView, WidgetType } from '@codemirror/view';
 import type { App, Editor, MarkdownView } from 'obsidian';
 import { Notice } from 'obsidian';
 
+import type { InlineEditMode, InlineEditService } from '../../../core/providers';
+import { ProviderRegistry } from '../../../core/providers';
 import type ClaudianPlugin from '../../../main';
 import { hideSelectionHighlight, showSelectionHighlight } from '../../../shared/components/SelectionHighlight';
 import { SlashCommandDropdown } from '../../../shared/components/SlashCommandDropdown';
@@ -22,7 +24,6 @@ import { buildExternalContextDisplayEntries } from '../../../utils/externalConte
 import { externalContextScanner } from '../../../utils/externalContextScanner';
 import { escapeHtml, normalizeInsertionText } from '../../../utils/inlineEdit';
 import { getVaultPath, normalizePathForVault as normalizePathForVaultUtil } from '../../../utils/path';
-import { type InlineEditMode, InlineEditService } from '../InlineEditService';
 
 export type InlineEditContext =
   | { mode: 'selection'; selectedText: string }
@@ -282,7 +283,7 @@ class InlineEditController {
     private getExternalContexts: () => string[],
     private resolve: (result: { decision: InlineEditDecision; editedText?: string }) => void
   ) {
-    this.inlineEditService = new InlineEditService(plugin);
+    this.inlineEditService = ProviderRegistry.createInlineEditService(plugin);
     this.mentionDataProvider = new VaultMentionDataProvider(this.app, {
       onFileLoadError: () => {
         new Notice('Failed to load vault files. Vault @-mentions may be unavailable.');

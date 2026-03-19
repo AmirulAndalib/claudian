@@ -18,7 +18,7 @@ import {
   readSDKSession,
   type SDKNativeMessage,
   sdkSessionExists,
-} from '@/utils/sdkSession';
+} from '@/providers/claude/history/ClaudeHistoryStore';
 
 // Mock fs, fs/promises, and os modules
 jest.mock('fs', () => ({

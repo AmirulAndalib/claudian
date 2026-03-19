@@ -30,27 +30,30 @@ import { Notice } from 'obsidian';
 import * as os from 'os';
 import * as path from 'path';
 
-import type ClaudianPlugin from '../../main';
-import { stripCurrentNoteContext } from '../../utils/context';
-import { getEnhancedPath, getMissingNodeError, parseEnvironmentVariables } from '../../utils/env';
-import { getPathAccessType, getVaultPath } from '../../utils/path';
-import {
-  buildContextFromHistory,
-  buildPromptWithHistoryContext,
-  getLastUserMessage,
-  isSessionExpiredError,
-} from '../../utils/session';
 import {
   createBlocklistHook,
   createVaultRestrictionHook,
-} from '../hooks';
-import type { McpServerManager } from '../mcp';
-import { isSessionInitEvent, isStreamChunk, transformSDKMessage } from '../sdk';
+} from '../../../core/hooks';
+import type { McpServerManager } from '../../../core/mcp';
+import { CLAUDE_PROVIDER_CAPABILITIES } from '../../../core/providers/types';
+import type {
+  ApprovalCallback,
+  AskUserQuestionCallback,
+  ChatRewindResult,
+  ChatRuntime,
+  ChatRuntimeConversationState,
+  ChatRuntimeEnsureReadyOptions,
+  ChatRuntimeQueryOptions,
+  ChatTurnRequest,
+  PreparedChatTurn,
+  SessionUpdateResult,
+} from '../../../core/runtime';
+import { isSessionInitEvent, isStreamChunk } from '../../../core/sdk';
 import {
   buildPermissionUpdates,
   getActionDescription,
-} from '../security';
-import { TOOL_ASK_USER_QUESTION, TOOL_ENTER_PLAN_MODE, TOOL_EXIT_PLAN_MODE, TOOL_SKILL } from '../tools/toolNames';
+} from '../../../core/security';
+import { TOOL_ASK_USER_QUESTION, TOOL_ENTER_PLAN_MODE, TOOL_EXIT_PLAN_MODE, TOOL_SKILL } from '../../../core/tools/toolNames';
 import type {
   ApprovalDecision,
   ChatMessage,
@@ -61,16 +64,30 @@ import type {
   PermissionMode,
   SlashCommand,
   StreamChunk,
-} from '../types';
-import { isAdaptiveThinkingModel, THINKING_BUDGETS } from '../types';
-import { MessageChannel } from './MessageChannel';
+  ToolCallInfo,
+} from '../../../core/types';
+import { isAdaptiveThinkingModel, THINKING_BUDGETS } from '../../../core/types';
+import type ClaudianPlugin from '../../../main';
+import { stripCurrentNoteContext } from '../../../utils/context';
+import { getEnhancedPath, getMissingNodeError, parseEnvironmentVariables } from '../../../utils/env';
+import { getPathAccessType, getVaultPath } from '../../../utils/path';
+import {
+  buildContextFromHistory,
+  buildPromptWithHistoryContext,
+  getLastUserMessage,
+  isSessionExpiredError,
+} from '../../../utils/session';
+import { loadSubagentFinalResult, loadSubagentToolCalls } from '../history/ClaudeHistoryStore';
+import { encodeClaudeTurn } from '../prompt';
+import { transformSDKMessage } from '../stream/transformClaudeMessage';
+import { MessageChannel } from './ClaudeMessageChannel';
 import {
   type ColdStartQueryContext,
   type PersistentQueryContext,
   QueryOptionsBuilder,
   type QueryOptionsContext,
-} from './QueryOptionsBuilder';
-import { SessionManager } from './SessionManager';
+} from './ClaudeQueryOptionsBuilder';
+import { SessionManager } from './ClaudeSessionManager';
 import {
   type ClosePersistentQueryOptions,
   createResponseHandler,
@@ -81,50 +98,27 @@ import {
 } from './types';
 
 export type { ApprovalDecision };
+export type {
+  ApprovalCallback,
+  ApprovalCallbackOptions,
+  AskUserQuestionCallback,
+} from '../../../core/runtime';
 
-export interface ApprovalCallbackOptions {
-  decisionReason?: string;
-  blockedPath?: string;
-  agentID?: string;
+type EnsureReadyOptions = ChatRuntimeEnsureReadyOptions;
+type QueryOptions = ChatRuntimeQueryOptions;
+
+function isChatMessageArray(value: unknown): value is ChatMessage[] {
+  return Array.isArray(value) && value.length > 0 &&
+    !!value[0] && typeof value[0] === 'object' && 'role' in value[0] && 'content' in value[0];
 }
 
-export type ApprovalCallback = (
-  toolName: string,
-  input: Record<string, unknown>,
-  description: string,
-  options?: ApprovalCallbackOptions,
-) => Promise<ApprovalDecision>;
-
-export type AskUserQuestionCallback = (
-  input: Record<string, unknown>,
-  signal?: AbortSignal,
-) => Promise<Record<string, string> | null>;
-
-export interface QueryOptions {
-  allowedTools?: string[];
-  model?: string;
-  /** MCP servers @-mentioned in the prompt. */
-  mcpMentions?: Set<string>;
-  /** MCP servers enabled via UI selector (in addition to @-mentioned servers). */
-  enabledMcpServers?: Set<string>;
-  /** Force cold-start query (bypass persistent query). */
-  forceColdStart?: boolean;
-  /** Session-specific external context paths (directories with full access). */
-  externalContextPaths?: string[];
+function isImageAttachmentArray(value: unknown): value is ImageAttachment[] {
+  return Array.isArray(value) && value.length > 0 &&
+    !!value[0] && typeof value[0] === 'object' && 'mediaType' in value[0] && 'data' in value[0];
 }
 
-export interface EnsureReadyOptions {
-  /** Session ID to resume. Auto-resolved from sessionManager if not provided. */
-  sessionId?: string;
-  /** External context paths to include. */
-  externalContextPaths?: string[];
-  /** Force restart even if query is running (for session switch, crash recovery). */
-  force?: boolean;
-  /** Preserve response handlers across restart (for mid-turn crash recovery). */
-  preserveHandlers?: boolean;
-}
-
-export class ClaudianService {
+export class ClaudianService implements ChatRuntime {
+  readonly providerId = CLAUDE_PROVIDER_CAPABILITIES.providerId;
   private plugin: ClaudianPlugin;
   private abortController: AbortController | null = null;
   private approvalCallback: ApprovalCallback | null = null;
@@ -168,6 +162,14 @@ export class ClaudianService {
     this.mcpManager = mcpManager;
   }
 
+  getCapabilities() {
+    return CLAUDE_PROVIDER_CAPABILITIES;
+  }
+
+  prepareTurn(request: ChatTurnRequest): PreparedChatTurn {
+    return encodeClaudeTurn(request, this.mcpManager);
+  }
+
   onReadyStateChange(listener: (ready: boolean) => void): () => void {
     this.readyStateListeners.add(listener);
     try {
@@ -199,6 +201,10 @@ export class ClaudianService {
     this.pendingResumeAt = uuid;
   }
 
+  setResumeCheckpoint(checkpointId: string | undefined): void {
+    this.setPendingResumeAt(checkpointId);
+  }
+
   /** One-shot: consumed on the next query, then cleared by routeMessage on session init. */
   applyForkState(conv: Pick<Conversation, 'sessionId' | 'sdkSessionId' | 'forkSource'>): string | null {
     const isPending = !conv.sessionId && !conv.sdkSessionId && !!conv.forkSource;
@@ -209,6 +215,94 @@ export class ClaudianService {
       this.pendingResumeAt = undefined;
     }
     return conv.sessionId ?? conv.forkSource?.sessionId ?? null;
+  }
+
+  syncConversationState(
+    conversation: ChatRuntimeConversationState | null,
+    externalContextPaths?: string[],
+  ): void {
+    if (!conversation) {
+      this.pendingForkSession = false;
+      this.pendingResumeAt = undefined;
+      this.setSessionId(null, externalContextPaths);
+      return;
+    }
+
+    // The interface only requires `sessionId`, but callers pass a full Conversation
+    // which also carries Claude-specific fork/session fields.
+    const conv = conversation as Pick<Conversation, 'sessionId' | 'sdkSessionId' | 'forkSource'>;
+    const resolvedSessionId = this.applyForkState(conv);
+    this.setSessionId(resolvedSessionId, externalContextPaths);
+  }
+
+  buildSessionUpdates({ conversation, sessionInvalidated }: {
+    conversation: Conversation | null;
+    sessionInvalidated: boolean;
+  }): SessionUpdateResult {
+    const sessionId = this.getSessionId();
+
+    const wasNative = conversation?.isNative ?? false;
+    const shouldPromote = !wasNative && !!sessionId;
+    const isNative = wasNative || shouldPromote;
+    const legacyMessages = conversation?.messages ?? [];
+    const legacyCutoffAt = shouldPromote
+      ? legacyMessages[legacyMessages.length - 1]?.timestamp
+      : conversation?.legacyCutoffAt;
+
+    const oldSdkSessionId = conversation?.sdkSessionId;
+    const sessionChanged = isNative && sessionId && oldSdkSessionId && sessionId !== oldSdkSessionId;
+    const previousSdkSessionIds = sessionChanged
+      ? [...new Set([...(conversation?.previousSdkSessionIds || []), oldSdkSessionId])]
+      : conversation?.previousSdkSessionIds;
+
+    const isForkSourceOnly = !!conversation?.forkSource &&
+      !conversation?.sdkSessionId &&
+      sessionId === conversation.forkSource.sessionId;
+
+    let resolvedSessionId: string | null;
+    if (sessionInvalidated) {
+      resolvedSessionId = null;
+    } else if (isForkSourceOnly) {
+      resolvedSessionId = conversation?.sessionId ?? null;
+    } else {
+      resolvedSessionId = sessionId ?? conversation?.sessionId ?? null;
+    }
+
+    const updates: Partial<Conversation> = {
+      sessionId: resolvedSessionId,
+      sdkSessionId: isNative && sessionId && !isForkSourceOnly ? sessionId : conversation?.sdkSessionId,
+      previousSdkSessionIds,
+      isNative: isNative || undefined,
+      legacyCutoffAt,
+      sdkMessagesLoaded: isNative ? true : undefined,
+    };
+
+    if (conversation?.forkSource && sessionId && sessionId !== conversation.forkSource.sessionId) {
+      updates.forkSource = undefined;
+    }
+
+    return { updates, isNative };
+  }
+
+  resolveSessionIdForFork(conversation: Conversation | null): string | null {
+    const sessionId = this.getSessionId();
+    if (sessionId) return sessionId;
+    if (!conversation) return null;
+    return conversation.sdkSessionId ?? conversation.sessionId ?? conversation.forkSource?.sessionId ?? null;
+  }
+
+  async loadSubagentToolCalls(agentId: string): Promise<ToolCallInfo[]> {
+    const sessionId = this.getSessionId();
+    const vaultPath = getVaultPath(this.plugin.app);
+    if (!sessionId || !vaultPath) return [];
+    return loadSubagentToolCalls(vaultPath, sessionId, agentId);
+  }
+
+  async loadSubagentFinalResult(agentId: string): Promise<string | null> {
+    const sessionId = this.getSessionId();
+    const vaultPath = getVaultPath(this.plugin.app);
+    if (!sessionId || !vaultPath) return null;
+    return loadSubagentFinalResult(vaultPath, sessionId, agentId);
   }
 
   async reloadMcpServers(): Promise<void> {
@@ -712,6 +806,100 @@ export class ClaudianService {
     }
   }
 
+  private encodeTurnRequest(request: ChatTurnRequest): PreparedChatTurn {
+    return encodeClaudeTurn(request, this.mcpManager);
+  }
+
+  private buildLegacyTurnRequest(
+    prompt: string,
+    images?: ImageAttachment[],
+    queryOptions?: QueryOptions,
+  ): ChatTurnRequest {
+    return {
+      text: prompt,
+      images,
+      externalContextPaths: queryOptions?.externalContextPaths,
+      enabledMcpServers: queryOptions?.enabledMcpServers,
+    };
+  }
+
+  private buildQueryOptionsFromTurnRequest(
+    request: ChatTurnRequest,
+    encodedTurn: PreparedChatTurn,
+    legacyQueryOptions?: QueryOptions,
+  ): QueryOptions | undefined {
+    const mcpMentions = legacyQueryOptions?.mcpMentions
+      ? new Set([...legacyQueryOptions.mcpMentions, ...encodedTurn.mcpMentions])
+      : encodedTurn.mcpMentions;
+
+    const effectiveQueryOptions: QueryOptions = {
+      allowedTools: legacyQueryOptions?.allowedTools,
+      model: legacyQueryOptions?.model,
+      mcpMentions,
+      enabledMcpServers: request.enabledMcpServers ?? legacyQueryOptions?.enabledMcpServers,
+      forceColdStart: legacyQueryOptions?.forceColdStart,
+      externalContextPaths: request.externalContextPaths ?? legacyQueryOptions?.externalContextPaths,
+    };
+
+    if (
+      effectiveQueryOptions.allowedTools === undefined &&
+      effectiveQueryOptions.model === undefined &&
+      effectiveQueryOptions.enabledMcpServers === undefined &&
+      effectiveQueryOptions.forceColdStart === undefined &&
+      effectiveQueryOptions.externalContextPaths === undefined &&
+      (effectiveQueryOptions.mcpMentions?.size ?? 0) === 0
+    ) {
+      return undefined;
+    }
+
+    return effectiveQueryOptions;
+  }
+
+  private normalizeTurnInvocation(
+    turnOrPrompt: PreparedChatTurn | string,
+    imagesOrHistory?: ImageAttachment[] | ChatMessage[],
+    conversationHistoryOrQueryOptions?: ChatMessage[] | QueryOptions,
+    legacyQueryOptions?: QueryOptions,
+  ): {
+    request: ChatTurnRequest;
+    encodedTurn: PreparedChatTurn;
+    conversationHistory?: ChatMessage[];
+    queryOptions?: QueryOptions;
+  } {
+    if (typeof turnOrPrompt !== 'string') {
+      const turn = turnOrPrompt;
+      const conversationHistory = isChatMessageArray(imagesOrHistory)
+        ? imagesOrHistory
+        : undefined;
+      const explicitQueryOptions = isChatMessageArray(conversationHistoryOrQueryOptions)
+        ? undefined
+        : conversationHistoryOrQueryOptions as QueryOptions | undefined;
+      return {
+        request: turn.request,
+        encodedTurn: turn,
+        conversationHistory,
+        queryOptions: this.buildQueryOptionsFromTurnRequest(turn.request, turn, explicitQueryOptions),
+      };
+    }
+
+    const images = isImageAttachmentArray(imagesOrHistory) ? imagesOrHistory : undefined;
+    const conversationHistory = isChatMessageArray(conversationHistoryOrQueryOptions)
+      ? conversationHistoryOrQueryOptions
+      : undefined;
+    const queryOptions = isChatMessageArray(conversationHistoryOrQueryOptions)
+      ? legacyQueryOptions
+      : conversationHistoryOrQueryOptions ?? legacyQueryOptions;
+    const request = this.buildLegacyTurnRequest(turnOrPrompt, images, queryOptions);
+    const encodedTurn = this.encodeTurnRequest(request);
+
+    return {
+      request,
+      encodedTurn,
+      conversationHistory,
+      queryOptions: this.buildQueryOptionsFromTurnRequest(request, encodedTurn, queryOptions),
+    };
+  }
+
   isPersistentQueryActive(): boolean {
     return this.persistentQuery !== null && !this.shuttingDown;
   }
@@ -723,12 +911,34 @@ export class ClaudianService {
    * - Persistent query: default chat conversation
    * - Cold-start query: only when forceColdStart is set
    */
-  async *query(
+  query(
+    turn: PreparedChatTurn,
+    conversationHistory?: ChatMessage[],
+    queryOptions?: QueryOptions,
+  ): AsyncGenerator<StreamChunk>;
+  query(
     prompt: string,
     images?: ImageAttachment[],
     conversationHistory?: ChatMessage[],
-    queryOptions?: QueryOptions
+    queryOptions?: QueryOptions,
+  ): AsyncGenerator<StreamChunk>;
+  async *query(
+    turnOrPrompt: PreparedChatTurn | string,
+    imagesOrHistory?: ImageAttachment[] | ChatMessage[],
+    conversationHistoryOrQueryOptions?: ChatMessage[] | QueryOptions,
+    legacyQueryOptions?: QueryOptions,
   ): AsyncGenerator<StreamChunk> {
+    const normalized = this.normalizeTurnInvocation(
+      turnOrPrompt,
+      imagesOrHistory,
+      conversationHistoryOrQueryOptions,
+      legacyQueryOptions,
+    );
+    const prompt = normalized.encodedTurn.prompt;
+    const images = normalized.request.images;
+    const conversationHistory = normalized.conversationHistory;
+    const queryOptions = normalized.queryOptions;
+
     const vaultPath = getVaultPath(this.plugin.app);
     if (!vaultPath) {
       yield { type: 'error', content: 'Could not determine vault path' };
@@ -1598,7 +1808,7 @@ export class ClaudianService {
     return { restore, cleanup };
   }
 
-  async rewind(sdkUserUuid: string, sdkAssistantUuid: string): Promise<RewindFilesResult> {
+  async rewind(sdkUserUuid: string, sdkAssistantUuid: string): Promise<ChatRewindResult> {
     // SDK only returns filesChanged/insertions/deletions on dry runs
     const preview = await this.rewindFiles(sdkUserUuid, true);
     if (!preview.canRewind) return preview;

@@ -1,13 +1,15 @@
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import { query as agentQuery } from '@anthropic-ai/claude-agent-sdk';
 
-import { buildRefineSystemPrompt } from '../../../core/prompts/instructionRefine';
+import type { RefineProgressCallback } from '../../../core/providers/types';
 import { type InstructionRefineResult, isAdaptiveThinkingModel, THINKING_BUDGETS } from '../../../core/types';
 import type ClaudianPlugin from '../../../main';
 import { getEnhancedPath, getMissingNodeError, parseEnvironmentVariables } from '../../../utils/env';
 import { getVaultPath } from '../../../utils/path';
+import { buildRefineSystemPrompt } from '../prompt';
+import { extractAssistantText } from './extractAssistantText';
 
-export type RefineProgressCallback = (update: InstructionRefineResult) => void;
+export type { RefineProgressCallback };
 
 export class InstructionRefineService {
   private plugin: ClaudianPlugin;
@@ -126,7 +128,7 @@ export class InstructionRefineService {
           this.sessionId = message.session_id;
         }
 
-        const text = this.extractTextFromMessage(message);
+        const text = extractAssistantText(message);
         if (text) {
           responseText += text;
           // Stream progress updates
@@ -162,15 +164,4 @@ export class InstructionRefineService {
     return { success: false, error: 'Empty response' };
   }
 
-  /** Extracts text content from SDK message. */
-  private extractTextFromMessage(message: { type: string; message?: { content?: Array<{ type: string; text?: string }> } }): string {
-    if (message.type !== 'assistant' || !message.message?.content) {
-      return '';
-    }
-
-    return message.message.content
-      .filter((block): block is { type: 'text'; text: string } => block.type === 'text' && !!block.text)
-      .map(block => block.text)
-      .join('');
-  }
 }

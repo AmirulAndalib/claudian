@@ -1,7 +1,7 @@
 import type { SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
 import { spawn } from 'child_process';
 
-import { createCustomSpawnFunction } from '@/core/agent/customSpawn';
+import { createCustomSpawnFunction } from '@/providers/claude/runtime/customSpawn';
 import * as env from '@/utils/env';
 
 jest.mock('child_process', () => ({

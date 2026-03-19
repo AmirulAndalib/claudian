@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 
-import { ClaudeCliResolver, resolveClaudeCliPath } from '@/utils/claudeCli';
+import { ClaudeCliResolver, resolveClaudeCliPath } from '@/providers/claude/runtime/ClaudeCliResolver';
 import { findClaudeCLIPath } from '@/utils/path';
 
 jest.mock('fs');

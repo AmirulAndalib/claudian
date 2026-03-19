@@ -45,6 +45,7 @@ function createMockDeps(overrides: Partial<ConversationControllerDeps> = {}): Co
         updatedAt: Date.now(),
       }),
       getConversationById: jest.fn().mockResolvedValue(null),
+      getConversationSync: jest.fn().mockReturnValue(null),
       getConversationList: jest.fn().mockReturnValue([]),
       findEmptyConversation: jest.fn().mockResolvedValue(null),
       updateConversation: jest.fn().mockResolvedValue(undefined),
@@ -1594,6 +1595,47 @@ describe('ConversationController - Persistent External Context Paths', () => {
   });
 });
 
+function createMockBuildSessionUpdates(mockService: any) {
+  return jest.fn().mockImplementation(({ conversation, sessionInvalidated }: any) => {
+    const sessionId = mockService.getSessionId();
+    const wasNative = conversation?.isNative ?? false;
+    const shouldPromote = !wasNative && !!sessionId;
+    const isNative = wasNative || shouldPromote;
+    const legacyMessages = conversation?.messages ?? [];
+    const legacyCutoffAt = shouldPromote
+      ? legacyMessages[legacyMessages.length - 1]?.timestamp
+      : conversation?.legacyCutoffAt;
+    const oldSdkSessionId = conversation?.sdkSessionId;
+    const sessionChanged = isNative && sessionId && oldSdkSessionId && sessionId !== oldSdkSessionId;
+    const previousSdkSessionIds = sessionChanged
+      ? [...new Set([...(conversation?.previousSdkSessionIds || []), oldSdkSessionId])]
+      : conversation?.previousSdkSessionIds;
+    const isForkSourceOnly = !!conversation?.forkSource &&
+      !conversation?.sdkSessionId &&
+      sessionId === conversation.forkSource.sessionId;
+    let resolvedSessionId: string | null;
+    if (sessionInvalidated) {
+      resolvedSessionId = null;
+    } else if (isForkSourceOnly) {
+      resolvedSessionId = conversation?.sessionId ?? null;
+    } else {
+      resolvedSessionId = sessionId ?? conversation?.sessionId ?? null;
+    }
+    const updates: any = {
+      sessionId: resolvedSessionId,
+      sdkSessionId: isNative && sessionId && !isForkSourceOnly ? sessionId : conversation?.sdkSessionId,
+      previousSdkSessionIds,
+      isNative: isNative || undefined,
+      legacyCutoffAt,
+      sdkMessagesLoaded: isNative ? true : undefined,
+    };
+    if (conversation?.forkSource && sessionId && sessionId !== conversation.forkSource.sessionId) {
+      updates.forkSource = undefined;
+    }
+    return { updates, isNative };
+  });
+}
+
 describe('ConversationController - Previous SDK Session IDs', () => {
   let controller: ConversationController;
   let deps: ConversationControllerDeps;
@@ -1605,7 +1647,9 @@ describe('ConversationController - Previous SDK Session IDs', () => {
       getSessionId: jest.fn().mockReturnValue(null),
       setSessionId: jest.fn(),
       consumeSessionInvalidation: jest.fn().mockReturnValue(false),
+      buildSessionUpdates: null as any,
     };
+    mockAgentService.buildSessionUpdates = createMockBuildSessionUpdates(mockAgentService);
     deps = createMockDeps({
       getAgentService: () => mockAgentService,
     });
@@ -1618,7 +1662,7 @@ describe('ConversationController - Previous SDK Session IDs', () => {
       deps.state.messages = [{ id: '1', role: 'user', content: 'test', timestamp: Date.now() }];
 
       // Existing conversation has sdkSessionId 'session-A'
-      (deps.plugin.getConversationById as jest.Mock).mockResolvedValue({
+      (deps.plugin.getConversationSync as jest.Mock).mockReturnValue({
         id: 'conv-1',
         messages: [],
         sdkSessionId: 'session-A',
@@ -1645,7 +1689,7 @@ describe('ConversationController - Previous SDK Session IDs', () => {
       deps.state.messages = [{ id: '1', role: 'user', content: 'test', timestamp: Date.now() }];
 
       // Conversation already has previous sessions [A], current is B
-      (deps.plugin.getConversationById as jest.Mock).mockResolvedValue({
+      (deps.plugin.getConversationSync as jest.Mock).mockReturnValue({
         id: 'conv-1',
         messages: [],
         sdkSessionId: 'session-B',
@@ -1671,7 +1715,7 @@ describe('ConversationController - Previous SDK Session IDs', () => {
       deps.state.currentConversationId = 'conv-1';
       deps.state.messages = [{ id: '1', role: 'user', content: 'test', timestamp: Date.now() }];
 
-      (deps.plugin.getConversationById as jest.Mock).mockResolvedValue({
+      (deps.plugin.getConversationSync as jest.Mock).mockReturnValue({
         id: 'conv-1',
         messages: [],
         sdkSessionId: 'session-A',
@@ -1698,7 +1742,7 @@ describe('ConversationController - Previous SDK Session IDs', () => {
 
       // Simulate a race condition where session-A is already in previousSdkSessionIds
       // but sdkSessionId is still session-A (should not duplicate)
-      (deps.plugin.getConversationById as jest.Mock).mockResolvedValue({
+      (deps.plugin.getConversationSync as jest.Mock).mockReturnValue({
         id: 'conv-1',
         messages: [],
         sdkSessionId: 'session-A',
@@ -1734,7 +1778,9 @@ describe('ConversationController - Fork Session ID Isolation', () => {
       getSessionId: jest.fn().mockReturnValue(null),
       setSessionId: jest.fn(),
       consumeSessionInvalidation: jest.fn().mockReturnValue(false),
+      buildSessionUpdates: null as any,
     };
+    mockAgentService.buildSessionUpdates = createMockBuildSessionUpdates(mockAgentService);
     deps = createMockDeps({
       getAgentService: () => mockAgentService,
     });
@@ -1746,7 +1792,7 @@ describe('ConversationController - Fork Session ID Isolation', () => {
     deps.state.messages = [{ id: '1', role: 'user', content: 'test', timestamp: Date.now() }];
 
     // Fork conversation: has forkSource but no own sdkSessionId yet
-    (deps.plugin.getConversationById as jest.Mock).mockResolvedValue({
+    (deps.plugin.getConversationSync as jest.Mock).mockReturnValue({
       id: 'fork-conv',
       messages: [],
       sessionId: null,
@@ -1773,7 +1819,7 @@ describe('ConversationController - Fork Session ID Isolation', () => {
     deps.state.currentConversationId = 'fork-conv';
     deps.state.messages = [{ id: '1', role: 'user', content: 'test', timestamp: Date.now() }];
 
-    (deps.plugin.getConversationById as jest.Mock).mockResolvedValue({
+    (deps.plugin.getConversationSync as jest.Mock).mockReturnValue({
       id: 'fork-conv',
       messages: [],
       sessionId: null,
@@ -1802,7 +1848,7 @@ describe('ConversationController - Fork Session ID Isolation', () => {
     deps.state.messages = [{ id: '1', role: 'user', content: 'test', timestamp: Date.now() }];
 
     // Fork conversation after fork metadata was cleared (has its own sdkSessionId)
-    (deps.plugin.getConversationById as jest.Mock).mockResolvedValue({
+    (deps.plugin.getConversationSync as jest.Mock).mockReturnValue({
       id: 'fork-conv',
       messages: [],
       sessionId: 'new-session-xyz',
@@ -1834,17 +1880,18 @@ describe('ConversationController - switchTo fork path', () => {
     jest.clearAllMocks();
     mockAgentService = {
       getSessionId: jest.fn().mockReturnValue(null),
-      setSessionId: jest.fn(),
-      applyForkState: jest.fn((conv: any) => conv.sessionId ?? conv.forkSource?.sessionId ?? null),
+      syncConversationState: jest.fn(),
       consumeSessionInvalidation: jest.fn().mockReturnValue(false),
+      buildSessionUpdates: null as any,
     };
+    mockAgentService.buildSessionUpdates = createMockBuildSessionUpdates(mockAgentService);
     deps = createMockDeps({
       getAgentService: () => mockAgentService,
     });
     controller = new ConversationController(deps);
   });
 
-  it('should call applyForkState and pass resolved session ID to setSessionId for pending fork', async () => {
+  it('should sync conversation state for pending fork conversations', async () => {
     deps.state.currentConversationId = 'old-conv';
 
     const forkConversation = {
@@ -1859,8 +1906,10 @@ describe('ConversationController - switchTo fork path', () => {
 
     await controller.switchTo('fork-conv');
 
-    expect(mockAgentService.applyForkState).toHaveBeenCalledWith(forkConversation);
-    expect(mockAgentService.setSessionId).toHaveBeenCalledWith('source-session-abc', expect.any(Array));
+    expect(mockAgentService.syncConversationState).toHaveBeenCalledWith(
+      forkConversation,
+      expect.any(Array),
+    );
   });
 
   it('should resolve to own sessionId when fork already has its own session', async () => {
@@ -1878,8 +1927,10 @@ describe('ConversationController - switchTo fork path', () => {
 
     await controller.switchTo('fork-conv');
 
-    expect(mockAgentService.applyForkState).toHaveBeenCalledWith(forkConversation);
-    expect(mockAgentService.setSessionId).toHaveBeenCalledWith('own-session-xyz', expect.any(Array));
+    expect(mockAgentService.syncConversationState).toHaveBeenCalledWith(
+      forkConversation,
+      expect.any(Array),
+    );
   });
 });
 
@@ -2019,7 +2070,9 @@ describe('ConversationController - Rewind', () => {
       setSessionId: jest.fn(),
       consumeSessionInvalidation: jest.fn().mockReturnValue(false),
       rewind: jest.fn().mockResolvedValue({ canRewind: true, filesChanged: ['a.ts'] }),
+      buildSessionUpdates: null as any,
     };
+    mockAgentService.buildSessionUpdates = createMockBuildSessionUpdates(mockAgentService);
     deps = createMockDeps({
       getAgentService: () => mockAgentService,
     });

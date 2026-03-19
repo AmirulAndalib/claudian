@@ -2,7 +2,7 @@ import * as os from 'os';
 
 import { TOOL_SUBAGENT } from '@/core/tools';
 import { DEFAULT_SETTINGS, VIEW_TYPE_CLAUDIAN } from '@/core/types';
-import * as sdkSession from '@/utils/sdkSession';
+import * as sdkSession from '@/providers/claude/history/ClaudeHistoryStore';
 
 // Mock fs for ClaudianService
 jest.mock('fs');

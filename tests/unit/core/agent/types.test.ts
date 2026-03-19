@@ -1,6 +1,6 @@
 import { buildSDKMessage } from '@test/helpers/sdkMessages';
 
-import { computeSystemPromptKey, createResponseHandler, isTurnCompleteMessage } from '@/core/agent/types';
+import { computeSystemPromptKey, createResponseHandler, isTurnCompleteMessage } from '@/providers/claude/runtime/types';
 
 describe('isTurnCompleteMessage', () => {
   it('returns true for result message', () => {

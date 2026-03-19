@@ -1,6 +1,6 @@
 import { buildSDKMessage } from '@test/helpers/sdkMessages';
 
-import { transformSDKMessage } from '@/core/sdk/transformSDKMessage';
+import { transformSDKMessage } from '@/providers/claude/stream/transformClaudeMessage';
 
 const msg = buildSDKMessage;
 

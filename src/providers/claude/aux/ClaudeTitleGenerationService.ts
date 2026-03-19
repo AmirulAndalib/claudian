@@ -1,19 +1,17 @@
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import { query as agentQuery } from '@anthropic-ai/claude-agent-sdk';
 
-import { TITLE_GENERATION_SYSTEM_PROMPT } from '../../../core/prompts/titleGeneration';
+import type {
+  TitleGenerationCallback,
+  TitleGenerationResult,
+} from '../../../core/providers/types';
 import type ClaudianPlugin from '../../../main';
 import { getEnhancedPath, getMissingNodeError, parseEnvironmentVariables } from '../../../utils/env';
 import { getVaultPath } from '../../../utils/path';
+import { TITLE_GENERATION_SYSTEM_PROMPT } from '../prompt';
+import { extractAssistantText } from './extractAssistantText';
 
-export type TitleGenerationResult =
-  | { success: true; title: string }
-  | { success: false; error: string };
-
-export type TitleGenerationCallback = (
-  conversationId: string,
-  result: TitleGenerationResult
-) => Promise<void>;
+export type { TitleGenerationCallback, TitleGenerationResult };
 
 export class TitleGenerationService {
   private plugin: ClaudianPlugin;
@@ -125,7 +123,7 @@ Generate a title for this conversation:`;
           return;
         }
 
-        const text = this.extractTextFromMessage(message);
+        const text = extractAssistantText(message);
         if (text) {
           responseText += text;
         }
@@ -161,22 +159,6 @@ Generate a title for this conversation:`;
   private truncateText(text: string, maxLength: number): string {
     if (text.length <= maxLength) return text;
     return text.substring(0, maxLength) + '...';
-  }
-
-  /** Extracts text content from SDK message. */
-  private extractTextFromMessage(
-    message: { type: string; message?: { content?: Array<{ type: string; text?: string }> } }
-  ): string {
-    if (message.type !== 'assistant' || !message.message?.content) {
-      return '';
-    }
-
-    return message.message.content
-      .filter((block): block is { type: 'text'; text: string } =>
-        block.type === 'text' && !!block.text
-      )
-      .map((block) => block.text)
-      .join('');
   }
 
   /** Parses and cleans the title from response. */

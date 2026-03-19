@@ -49,6 +49,7 @@ function createMockPlugin(overrides: Record<string, any> = {}): any {
       ...(overrides.settings || {}),
     },
     getConversationById: jest.fn().mockResolvedValue(null),
+    getConversationSync: jest.fn().mockReturnValue(null),
     getConversationList: jest.fn().mockReturnValue([]),
     findConversationAcrossViews: jest.fn().mockReturnValue(null),
     ...overrides,
@@ -1235,14 +1236,13 @@ describe('TabManager - switchToTab Session Sync', () => {
   it('should sync service session for already-loaded tab with conversation', async () => {
     jest.clearAllMocks();
 
-    const mockSetSessionId = jest.fn();
+    const mockSyncConversationState = jest.fn();
     const mockService = {
-      setSessionId: mockSetSessionId,
-      closePersistentQuery: jest.fn(),
+      syncConversationState: mockSyncConversationState,
+      cleanup: jest.fn(),
       ensureReady: jest.fn().mockResolvedValue(true),
       onReadyStateChange: jest.fn(() => () => {}),
       isReady: jest.fn().mockReturnValue(true),
-      applyForkState: jest.fn((conv: any) => conv.sessionId ?? conv.forkSource?.sessionId ?? null),
     };
 
     let tabCounter = 0;
@@ -1262,7 +1262,7 @@ describe('TabManager - switchToTab Session Sync', () => {
     });
 
     const plugin = createMockPlugin();
-    plugin.getConversationById = jest.fn().mockResolvedValue({
+    plugin.getConversationSync = jest.fn().mockReturnValue({
       id: 'conv-loaded',
       messages: [{ id: 'msg-1', role: 'user', content: 'test' }],
       sessionId: 'session-xyz',
@@ -1280,16 +1280,18 @@ describe('TabManager - switchToTab Session Sync', () => {
     await manager.createTab(); // tab-2, auto-switches and triggers session sync
 
     // Should have synced the service session during auto-switch to tab-2
-    expect(mockSetSessionId).toHaveBeenCalledWith('session-xyz', ['/some/path']);
+    expect(mockSyncConversationState).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'conv-loaded', sessionId: 'session-xyz' }),
+      ['/some/path'],
+    );
   });
 
   it('should use persistentExternalContextPaths when conversation has no messages', async () => {
     jest.clearAllMocks();
 
-    const mockSetSessionId = jest.fn();
+    const mockSyncConversationState = jest.fn();
     const mockService = {
-      setSessionId: mockSetSessionId,
-      applyForkState: jest.fn((conv: any) => conv.sessionId ?? conv.forkSource?.sessionId ?? null),
+      syncConversationState: mockSyncConversationState,
     };
 
     let tabCounter = 0;
@@ -1314,7 +1316,7 @@ describe('TabManager - switchToTab Session Sync', () => {
         persistentExternalContextPaths: ['/persistent/path'],
       },
     });
-    plugin.getConversationById = jest.fn().mockResolvedValue({
+    plugin.getConversationSync = jest.fn().mockReturnValue({
       id: 'conv-empty',
       messages: [],
       sessionId: 'session-abc',
@@ -1332,7 +1334,10 @@ describe('TabManager - switchToTab Session Sync', () => {
     await manager.createTab(); // tab-2, auto-switches and triggers session sync
 
     // conversation.messages is empty, so should fall back to persistentExternalContextPaths
-    expect(mockSetSessionId).toHaveBeenCalledWith('session-abc', ['/persistent/path']);
+    expect(mockSyncConversationState).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'conv-empty', sessionId: 'session-abc' }),
+      ['/persistent/path'],
+    );
   });
 
   it('should initialize welcome for new tab without conversation', async () => {

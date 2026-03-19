@@ -5,7 +5,7 @@ import {
   setMockMessages,
 } from '@test/__mocks__/claude-agent-sdk';
 
-import { type TitleGenerationResult, TitleGenerationService } from '@/features/chat/services/TitleGenerationService';
+import { type TitleGenerationResult, TitleGenerationService } from '@/providers/claude/aux/ClaudeTitleGenerationService';
 function createMockPlugin(settings = {}) {
   return {
     settings: {

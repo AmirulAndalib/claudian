@@ -1,7 +1,7 @@
-import type { QueryOptionsContext } from '@/core/agent/QueryOptionsBuilder';
-import { QueryOptionsBuilder } from '@/core/agent/QueryOptionsBuilder';
-import type { PersistentQueryConfig } from '@/core/agent/types';
 import type { ClaudianSettings } from '@/core/types';
+import type { QueryOptionsContext } from '@/providers/claude/runtime/ClaudeQueryOptionsBuilder';
+import { QueryOptionsBuilder } from '@/providers/claude/runtime/ClaudeQueryOptionsBuilder';
+import type { PersistentQueryConfig } from '@/providers/claude/runtime/types';
 
 // Create a mock MCP server manager
 function createMockMcpManager() {

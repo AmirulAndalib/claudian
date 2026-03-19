@@ -25,12 +25,12 @@ jest.mock('@/core/types', () => {
 // Now import after all mocks are set up
 import { buildResultErrorMessage } from '@test/helpers/sdkMessages';
 
-import { ClaudianService } from '@/core/agent/ClaudianService';
 import { createVaultRestrictionHook } from '@/core/hooks/SecurityHooks';
-import { transformSDKMessage } from '@/core/sdk';
 import { getActionDescription, getActionPattern } from '@/core/security/ApprovalManager';
 import { getPathFromToolInput } from '@/core/tools/toolInput';
-import { resolveClaudeCliPath } from '@/utils/claudeCli';
+import { ClaudianService } from '@/providers/claude/runtime/ClaudeChatRuntime';
+import { resolveClaudeCliPath } from '@/providers/claude/runtime/ClaudeCliResolver';
+import { transformSDKMessage } from '@/providers/claude/stream/transformClaudeMessage';
 import {
   buildContextFromHistory,
   formatToolCallForContext,
@@ -83,6 +83,8 @@ function createMockMcpManager() {
     getDisallowedMcpTools: jest.fn().mockReturnValue([]),
     getAllDisallowedMcpTools: jest.fn().mockReturnValue([]),
     hasServers: jest.fn().mockReturnValue(false),
+    extractMentions: jest.fn().mockReturnValue(new Set<string>()),
+    transformMentions: jest.fn().mockImplementation((text: string) => text),
   } as any;
 }
 

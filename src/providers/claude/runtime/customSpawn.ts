@@ -9,7 +9,7 @@
 import type { SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
 import { spawn } from 'child_process';
 
-import { findNodeExecutable } from '../../utils/env';
+import { findNodeExecutable } from '../../../utils/env';
 
 export function createCustomSpawnFunction(
   enhancedPath: string

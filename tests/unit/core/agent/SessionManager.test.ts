@@ -1,4 +1,4 @@
-import { SessionManager } from '@/core/agent/SessionManager';
+import { SessionManager } from '@/providers/claude/runtime/ClaudeSessionManager';
 
 describe('SessionManager', () => {
   let manager: SessionManager;
